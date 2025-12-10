@@ -1,0 +1,273 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+		<meta name="viewport content="width=device-width,initialscale=1">
+<title>Mirror Mail - Prototype</title>
+<style>
+	 html,body{height:100%;margin:0;background:#111;color:#fff;font-family:sans-serif}
+  canvas{display:block;margin:0 auto;background:linear-gradient(#0f1720,#071019);touch-action:none}
+  #hud{position:fixed;left:10px;top:10px;z-index:10}
+  button{font-size:16px;padding:8px 12px}
+  #info{position:fixed;left:10px;bottom:10px;background:rgba(0,0,0,0.4);padding:8px;border-radius:6px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><button id="restart">Yeniden</button></div>
+<div id="info">Çiz: Parmağınla yol çiz. Üst (sıcak) ve alt (soğuk) postalar rota takip eder. Ama alt rota aynalanır.</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = canvas.width = Math.min(window.innerWidth, 900);
+let H = canvas.height = Math.min(window.innerHeight-50, 700);
+
+window.addEventListener('resize', ()=>{
+  W = canvas.width = Math.min(window.innerWidth, 900);
+  H = canvas.height = Math.min(window.innerHeight-50, 700);
+  draw();
+});
+
+const topRect = {x:20,y:20,w:W-40,h:(H-60)/2 - 10};
+const botRect = {x:20,y:topRect.y+topRect.h+20,w:W-40,h:(H-60)/2 - 10};
+
+let drawing = false;
+let currentPath = [];
+let savedPath = []; // array of points
+
+const lerp = (a,b,t)=> a + (b-a)*t;
+
+function pointerXY(e){
+  const touch = e.touches ? e.touches[0] : e;
+  const rect = canvas.getBoundingClientRect();
+  return {x: (touch.clientX - rect.left), y: (touch.clientY - rect.top)};
+}
+
+canvas.addEventListener('pointerdown', (e)=>{
+  e.preventDefault();
+  drawing=true;
+  currentPath = [];
+  const p = pointerXY(e);
+  currentPath.push(p);
+});
+
+canvas.addEventListener('pointermove', (e)=>{
+  if(!drawing) return;
+  e.preventDefault();
+  const p = pointerXY(e);
+  // keep points spaced to reduce size
+  const last = currentPath[currentPath.length-1];
+  if(!last || Math.hypot(p.x-last.x,p.y-last.y) > 6){
+    currentPath.push(p);
+    draw();
+  }
+});
+
+canvas.addEventListener('pointerup', (e)=>{
+  if(!drawing) return;
+  drawing=false;
+  // save normalized path relative to canvas
+  savedPath = simplifyPath(currentPath);
+  // start animation of postalar
+  startFollow(savedPath);
+});
+
+function simplifyPath(path){
+  // downsample: keep every Nth
+  const out = [];
+  for(let i=0;i<path.length;i+=2){
+    out.push({x: path[i].x, y: path[i].y});
+  }
+  return out;
+}
+
+// Entities
+const mailTop = {x: topRect.x + 40, y: topRect.y + topRect.h/2, r:12, t:0};
+const mailBot = {x: botRect.x + 40, y: botRect.y + botRect.h/2, r:12, t:0};
+const goalTop = {x: topRect.x + topRect.w - 60, y: topRect.y + topRect.h/2, r:18};
+const goalBot = {x: botRect.x + botRect.w - 60, y: botRect.y + botRect.h/2, r:18};
+
+// Simple obstacle example
+const obs = {x: W/2 - 30, y: topRect.y + topRect.h/2 - 30, w:60, h:60};
+
+let followStartTime = 0;
+let followDuration = 2000; // ms
+let animating = false;
+
+// Mirror function: mirror horizontally across canvas center-line
+function mirrorPoint(p){
+  return {x: W - p.x, y: (p.y - topRect.y) + botRect.y}; // maps top's y to bottom area
+}
+
+function startFollow(path){
+  if(!path || path.length < 2) return;
+  followStartTime = performance.now();
+  animating = true;
+  // place mails at path start positions projected to top/bot
+  mailTop.x = path[0].x; mailTop.y = path[0].y;
+  const mp = mirrorPoint(path[0]);
+  mailBot.x = mp.x; mailBot.y = mp.y;
+  mailTop.t = 0; mailBot.t = 0;
+}
+
+function update(){
+  const now = performance.now();
+  if(animating && savedPath.length>=2){
+    const elapsed = now - followStartTime;
+    const total = (savedPath.length-1) * 300; // 300ms per segment
+    const prog = Math.min(1, elapsed / total);
+    // compute position along path
+    const segCount = savedPath.length-1;
+    const floatIndex = prog * segCount;
+    const i = Math.floor(floatIndex);
+    const frac = floatIndex - i;
+    const a = savedPath[Math.max(0,i)];
+    const b = savedPath[Math.min(savedPath.length-1,i+1)];
+    mailTop.x = lerp(a.x,b.x,frac);
+    mailTop.y = lerp(a.y,b.y,frac);
+    // mirrored
+    const ma = mirrorPoint(a);
+    const mb = mirrorPoint(b);
+    mailBot.x = lerp(ma.x,mb.x,frac);
+    mailBot.y = lerp(ma.y,mb.y,frac);
+
+    // collision with obstacle in top
+    if(rectCircleColl(obs, mailTop)){
+      animating = false;
+      showMessage("Üst posta engelle çarptı! (Yeniden dener misin?)");
+    }
+
+    // Goal detection
+    if(dist(mailTop, goalTop) < goalTop.r + mailTop.r/2 && dist(mailBot, goalBot) < goalBot.r + mailBot.r/2){
+      animating = false;
+      showMessage("Başardın! Hem üst hem alt hedefe ulaşıldı.");
+    }
+
+    if(prog >= 1){
+      animating = false;
+      // if didn't reach both goals:
+      if(!(dist(mailTop, goalTop) < goalTop.r + mailTop.r/2 && dist(mailBot, goalBot) < goalBot.r + mailBot.r/2)){
+        showMessage("Tam hedefe ulaşamadın. Rotayı değiştirip tekrar dene.");
+      }
+    }
+  }
+
+  // draw
+  draw();
+  requestAnimationFrame(update);
+}
+
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function rectCircleColl(r, c){
+  const dx = Math.max(r.x, Math.min(c.x, r.x + r.w));
+  const dy = Math.max(r.y, Math.min(c.y, r.y + r.h));
+  return Math.hypot(dx - c.x, dy - c.y) < c.r;
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // draw top/bot rects
+  // top
+  roundRect(ctx, topRect.x, topRect.y, topRect.w, topRect.h, 8, '#ffefd5', '#2b2b2b');
+  // bottom
+  roundRect(ctx, botRect.x, botRect.y, botRect.w, botRect.h, 8, '#dff4ff', '#0a0a0a');
+
+  // draw obstacle
+  ctx.fillStyle = '#8b0000';
+  ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+  // draw saved path (top)
+  if(savedPath.length>0){
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(255,200,50,0.9)';
+    ctx.beginPath();
+    ctx.moveTo(savedPath[0].x, savedPath[0].y);
+    for(let i=1;i<savedPath.length;i++) ctx.lineTo(savedPath[i].x, savedPath[i].y);
+    ctx.stroke();
+
+    // mirrored path (bottom)
+    ctx.strokeStyle = 'rgba(100,200,255,0.9)';
+    ctx.beginPath();
+    const m0 = mirrorPoint(savedPath[0]);
+    ctx.moveTo(m0.x, m0.y);
+    for(let i=1;i<savedPath.length;i++){
+      const m = mirrorPoint(savedPath[i]);
+      ctx.lineTo(m.x, m.y);
+    }
+    ctx.stroke();
+  }
+
+  // draw current in-progress path
+  if(currentPath.length>0){
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = '#ffd27f';
+    ctx.beginPath();
+    ctx.moveTo(currentPath[0].x, currentPath[0].y);
+    for(let i=1;i<currentPath.length;i++) ctx.lineTo(currentPath[i].x, currentPath[i].y);
+    ctx.stroke();
+  }
+
+  // draw goals
+  ctx.fillStyle = '#ff7043';
+  ctx.beginPath(); ctx.arc(goalTop.x, goalTop.y, goalTop.r, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#3ec5ff';
+  ctx.beginPath(); ctx.arc(goalBot.x, goalBot.y, goalBot.r, 0, Math.PI*2); ctx.fill();
+
+  // draw mails
+  // top
+  ctx.fillStyle = '#ffcc88';
+  ctx.beginPath(); ctx.arc(mailTop.x, mailTop.y, mailTop.r, 0, Math.PI*2); ctx.fill();
+  // bot
+  ctx.fillStyle = '#aee8ff';
+  ctx.beginPath(); ctx.arc(mailBot.x, mailBot.y, mailBot.r, 0, Math.PI*2); ctx.fill();
+}
+
+function roundRect(ctx,x,y,w,h,r, fill='#222', stroke='#000'){
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y, x+w,y+h, r);
+  ctx.arcTo(x+w,y+h, x,y+h, r);
+  ctx.arcTo(x,y+h, x,y, r);
+  ctx.arcTo(x,y, x+w,y, r);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.restore();
+}
+
+function showMessage(txt){
+  const old = document.getElementById('msgdiv');
+  if(old) old.remove();
+  const div = document.createElement('div');
+  div.id='msgdiv';
+  div.style.position='fixed';
+  div.style.left='50%';
+  div.style.top='50%';
+  div.style.transform='translate(-50%,-50%)';
+  div.style.background='rgba(0,0,0,0.8)';
+  div.style.padding='16px';
+  div.style.border='2px solid #fff';
+  div.style.borderRadius='8px';
+  div.style.zIndex=9999;
+  div.innerText = txt;
+  document.body.appendChild(div);
+  setTimeout(()=>{div.remove();}, 2200);
+}
+
+document.getElementById('restart').addEventListener('click', ()=>{
+  savedPath = [];
+  currentPath = [];
+  animating = false;
+  mailTop.x = topRect.x + 40; mailTop.y = topRect.y + topRect.h/2;
+  mailBot.x = botRect.x + 40; mailBot.y = botRect.y + botRect.h/2;
+});
+
+// start loop
+draw();
+requestAnimationFrame(update);
+</script>
+</body>
+</html>
